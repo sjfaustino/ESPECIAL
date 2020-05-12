@@ -135,7 +135,8 @@ void TelegramHandler::handleNewMessages(int numNewMessages) {
       #endif
       // 'g' is a command for gpios
       if (cmd[0] == 'g') {
-        preference.setGpioState(id);
+        // We set the persist flag to false, to allow the mainloop to pick up new changes and react accordingly
+        preference.setGpioState(id, -1);
         bot->sendMessageWithInlineKeyboard(bot->messages[i].chat_id, "Gpios available in output mode", "", generateInlineKeyboardsForGpios(), bot->messages[i].message_id);
       // 'a' is a command for automations
       } else {
@@ -202,20 +203,27 @@ void TelegramHandler::sendQueuedMessages() {
   bool didSentMessage = false;
   for (int i=0; i<lastMessageQueuedPosition; i++) {
     // Send queued message to all registered users
-    for (int chatId: preference.telegram.chatIds) {
-      #ifdef __debug  
-        Serial.printf("Telegram: sending message: %s\n", messagesQueue[i]);
-      #endif
-      bot->sendMessage(String(chatId), messagesQueue[i]);
-      memset(messagesQueue, 0, sizeof(messagesQueue));
-      lastMessageQueuedPosition = 0; 
-      didSentMessage = true;
+    for (int i=0; i< MAX_TELEGRAM_USERS_NUMBER; i++) {
+      // Check if we have a chatId corresponding to a telegram user
+      if (preference.telegram.users[i] && preference.telegram.chatIds[i]) {
+        #ifdef __debug  
+          Serial.printf("Telegram: sending message: %s\n", messagesQueue[i]);
+        #endif
+        bot->sendMessage(String(preference.telegram.chatIds[i]), messagesQueue[i]);
+        didSentMessage = true;
+      } 
     }
   }
   if (!didSentMessage && lastMessageQueuedPosition != 0) {
     #ifdef __debug  
       Serial.println("Telegram: could not send messages: %s\nReason: no chatids defined, send a message first to the bot before using it.");
     #endif
+  }
+  // Empty queue
+  if (didSentMessage) {
+    Serial.print("Telegram: empty queued messages\n");
+    memset(messagesQueue, 0, sizeof(messagesQueue));
+    lastMessageQueuedPosition = 0; 
   }
 }
 
