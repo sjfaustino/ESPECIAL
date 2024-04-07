@@ -1,17 +1,20 @@
 #include "TelegramHandler.h"
-#include "PreferenceHandler.h"
 #include <ArduinoJson.h>
+#include "esp_camera.h"
 
-//unmark following line to enable debug mode
-#define __debug
-
-int Bot_mtbs = 1000; //mean time between scan messages
+int Bot_mtbs = 1000; //min time between scan messages
 long Bot_lasttime;   //last time messages' scan has been done
+
+camera_fb_t *fb = NULL;
+bool isMoreDataAvailable();
+byte *getNextBuffer();
+int getNextBufferLen();
+bool dataAvailable = false;
 
 void TelegramHandler::begin() {
     if (!isInit && preference.telegram.active && preference.telegram.token) {
       #ifdef __debug  
-        Serial.println("Telegram: init");
+        Serial.println("[TELEGRAM] init");
       #endif
       bot = new UniversalTelegramBot(preference.telegram.token, client);
       isInit = true;
@@ -25,7 +28,7 @@ void TelegramHandler::handle()
       int numNewMessages = bot->getUpdates(bot->last_message_received + 1);
       while(numNewMessages) {
         #ifdef __debug  
-          Serial.printf("Telegram: got %i new messages\n", numNewMessages);
+          Serial.printf("[TELEGRAM] got %i new messages\n", numNewMessages);
         #endif
         handleNewMessages(numNewMessages);
         numNewMessages = bot->getUpdates(bot->last_message_received + 1);
@@ -42,14 +45,13 @@ String TelegramHandler::generateButtonFormat(GpioFlash& gpio) {
   const size_t capacity = JSON_OBJECT_SIZE(2) + 200;
   DynamicJsonDocument doc(capacity);
   char text[50];
-  snprintf(text, sizeof(text), "%s %s", gpio.state ? "🔆" : "🌙", gpio.label);
+  snprintf(text, sizeof(text), "%s %s", gpio.state ? "🌙": "🔆", gpio.label);
   doc["text"] = text;
   char callback[50];
   snprintf(callback, sizeof(callback), "g-%i", gpio.pin);
   doc["callback_data"] = callback;
   String output;
   serializeJson(doc, output);
-  Serial.printf("Inline keyboard: %s\n",output.c_str());
   return output;
 }
 
@@ -62,7 +64,6 @@ String TelegramHandler::generateButtonFormat(AutomationFlash& a) {
   doc["callback_data"] = callback;
   String output;
   serializeJson(doc, output);
-  Serial.printf("Inline keyboard: %s\n",output.c_str());
   return output;
 }
 
@@ -72,22 +73,19 @@ String TelegramHandler::generateInlineKeyboardsForGpios(bool inputMode) {
   // Dummy code to create 2 buttons per row in telegram api format
   for (int i = 0; i<GPIO_PIN_COUNT; i++) {
     JsonArray subArray = doc.createNestedArray();
-    Serial.printf("Gpio index %i pin %i, mode %i\n",i,preference.gpios[i].pin,preference.gpios[i].mode);
     if (preference.gpios[i].pin && ((preference.gpios[i].mode == OUTPUT && !inputMode)||(preference.gpios[i].mode == INPUT && inputMode))) {
-        subArray.add(serialized(generateButtonFormat(preference.gpios[i])));
+      subArray.add(serialized(generateButtonFormat(preference.gpios[i])));
     }
     do
     {
       i++;
     } while (i<GPIO_PIN_COUNT && ((preference.gpios[i].mode != OUTPUT && !inputMode)||(preference.gpios[i].mode != INPUT && inputMode)));
-    Serial.printf("Gpio index %i pin %i, mode %i\n",i,preference.gpios[i].pin,preference.gpios[i].mode);
     if (preference.gpios[i].pin && ((preference.gpios[i].mode == OUTPUT && !inputMode)||(preference.gpios[i].mode == INPUT && inputMode))) {
-        subArray.add(serialized(generateButtonFormat(preference.gpios[i])));
+      subArray.add(serialized(generateButtonFormat(preference.gpios[i])));
     }
   }
   String output;
   serializeJson(doc, output);
-  Serial.printf("Inline keyboard: %s\n",output.c_str());
   return output;
 }
 
@@ -103,7 +101,7 @@ String TelegramHandler::generateInlineKeyboardsForAutomations() {
     {
       i++;
     } while (i<MAX_AUTOMATIONS_NUMBER && !preference.automations[i].id);
-    if (preference.automations[i].id && i<MAX_AUTOMATIONS_NUMBER) {
+    if (i<MAX_AUTOMATIONS_NUMBER && preference.automations[i].id) {
         subArray.add(serialized(generateButtonFormat(preference.automations[i])));
     }
   }
@@ -128,10 +126,10 @@ void TelegramHandler::handleNewMessages(int numNewMessages) {
     if (bot->messages[i].type == "callback_query") {
       const char *cmd = bot->messages[i].text.c_str();
       char id_c[5];
-      strncpy(id_c, cmd+2, strlen(cmd)-1);
+      strncpy(id_c, cmd+2, strnlen(cmd,MAX_MESSAGE_TEXT_SIZE)-1);
       int id = atoi(id_c);
       #ifdef __debug  
-        Serial.printf("Telegram: command: %c, id: %i\n",cmd[0], id);
+        Serial.printf("[TELEGRAM] command: %c, id: %i\n",cmd[0], id);
       #endif
       // 'g' is a command for gpios
       if (cmd[0] == 'g') {
@@ -160,7 +158,11 @@ void TelegramHandler::handleNewMessages(int numNewMessages) {
         bot->sendMessageWithInlineKeyboard(chat_id, "Gpios available in input mode", "", generateInlineKeyboardsForGpios(true));
       } else if (authorised && text == "/auto") {
         bot->sendMessageWithInlineKeyboard(chat_id, "Automations list", "", generateInlineKeyboardsForAutomations());
-      }else if (text == "/start") {
+      } else if (authorised) {
+        char unknown[512];
+        snprintf(unknown,512,"Hmm, I don't know that command.Here is a list of things I can react to:\n\n/out : returns an inline keyboard to control gpios set in output mode\n/in : returns gpios' state in input mode\n/analog : returns gpios' attached to channels (in analogue mode)\n/auto : returns an inline keyboard to trigger automations\n");
+        bot->sendMessage(chat_id, unknown, "Markdown");
+      } else if (text == "/start") {
         char welcome[512];
         snprintf(welcome,512,"Welcome to your ESP32 telegram bot, %s.\nHere you'll be able to control your ESP32.\nFirst, add your telegram id to the authorised list (in settings panel) to restrict your bot access:\n %s.\n\n/out : returns an inline keyboard to control gpios set in output mode\n/in : returns gpios' state in input mode\n/analog : returns gpios' attached to channels (in analogue mode)\n/auto : returns an inline keyboard to trigger automations\n",from_name,bot->messages[i].from_id);
         bot->sendMessage(chat_id, welcome, "Markdown");
@@ -183,17 +185,20 @@ void TelegramHandler::handleNewMessages(int numNewMessages) {
   }
 }
 
-void TelegramHandler::queueMessage(const char* message) {
+void TelegramHandler::queueMessage(const char* message, bool withPicture) {
   if (isInit && preference.telegram.token && preference.telegram.active) {
-    #ifdef __debug  
-      Serial.printf("Telegram: queued message: %s\n",message);
-    #endif
     if (lastMessageQueuedPosition<MAX_QUEUED_MESSAGE_NUMBER) {
-      strcpy(messagesQueue[lastMessageQueuedPosition],message);
+      #ifdef __debug  
+        Serial.printf("[TELEGRAM] queued message: %s\n",message);
+      #endif
+      TelegramMessageQueue newMessage;
+      strcpy(newMessage.text,message);
+      newMessage.sendWithPicture = withPicture;
+      messagesQueue[lastMessageQueuedPosition] = newMessage;
       lastMessageQueuedPosition++;
     } else {
       #ifdef __debug  
-        Serial.printf("Telegram: reach message queued maximum: %i\n",MAX_QUEUED_MESSAGE_NUMBER);
+        Serial.printf("[TELEGRAM] reach message queued maximum: %i\n",MAX_QUEUED_MESSAGE_NUMBER);
       #endif
     }
   }
@@ -203,27 +208,77 @@ void TelegramHandler::sendQueuedMessages() {
   bool didSentMessage = false;
   for (int i=0; i<lastMessageQueuedPosition; i++) {
     // Send queued message to all registered users
-    for (int i=0; i< MAX_TELEGRAM_USERS_NUMBER; i++) {
+    for (int j=0; j< MAX_TELEGRAM_USERS_NUMBER; j++) {
       // Check if we have a chatId corresponding to a telegram user
-      if (preference.telegram.users[i] && preference.telegram.chatIds[i]) {
+      if (preference.telegram.users[j] && preference.telegram.chatIds[j]) {
         #ifdef __debug  
-          Serial.printf("Telegram: sending message: %s\n", messagesQueue[i]);
+          Serial.printf("[TELEGRAM] sending message: %s\n", messagesQueue[i].text);
         #endif
-        bot->sendMessage(String(preference.telegram.chatIds[i]), messagesQueue[i]);
+        if (strcmp(messagesQueue[i].text, "") > 0) {
+          bot->sendMessage(String(preference.telegram.chatIds[j]), messagesQueue[i].text);
+        }
+        if (messagesQueue[i].sendWithPicture) {
+          sendPictureFromCameraToChat(preference.telegram.chatIds[j]);
+        }
         didSentMessage = true;
       } 
     }
   }
   if (!didSentMessage && lastMessageQueuedPosition != 0) {
     #ifdef __debug  
-      Serial.println("Telegram: could not send messages: %s\nReason: no chatids defined, send a message first to the bot before using it.");
+      Serial.println("[TELEGRAM] could not send messages: %s\nReason: no chatids defined, send a message first to the bot before using it.");
     #endif
   }
   // Empty queue
   if (didSentMessage) {
-    Serial.print("Telegram: empty queued messages\n");
+    Serial.print("[TELEGRAM] empty queued messages\n");
     memset(messagesQueue, 0, sizeof(messagesQueue));
     lastMessageQueuedPosition = 0; 
   }
+}
+
+void TelegramHandler::sendPictureFromCameraToChat(int chat_id) {
+  // Take Picture with Camera
+  fb = esp_camera_fb_get();
+  if (!fb)
+  {
+    Serial.println("Camera capture failed");
+    return;
+  }
+  dataAvailable = true;
+  Serial.println("Sending");
+  bot->sendPhotoByBinary(String(chat_id), "image/jpeg", fb->len,
+                        isMoreDataAvailable, nullptr,
+                        getNextBuffer, getNextBufferLen);
+
+  #ifdef __debug  
+    Serial.printf("[TELEGRAM] sending picture from camera\n");
+  #endif
+  esp_camera_fb_return(fb);
+}
+
+bool isMoreDataAvailable()
+{
+  if (dataAvailable) {
+    dataAvailable = false;
+    return true;
+  }
+  return false;
+}
+
+byte *getNextBuffer()
+{
+  if (fb) {
+    return fb->buf;
+  }
+  return nullptr;
+}
+
+int getNextBufferLen()
+{
+  if (fb) {
+    return fb->len;
+  }
+  return 0;
 }
 

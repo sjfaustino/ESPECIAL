@@ -5,23 +5,21 @@
 #include <Arduino.h>
 #include "PreferenceHandler.h"
 #include <WiFiClient.h>
-#include <PubSubClient.h>  
-
-#define RETRY_ATTEMPT 5
+#include <PubSubClient.h>
 
 typedef struct
 {
-    char debug[256];
-    char gpio[256];
-    char automation[256];
-    char config[256];
- }  MqttTopic;
+    char debug[TOPIC_MAX_SIZE];
+    char gpio[TOPIC_MAX_SIZE];
+    char automation[TOPIC_MAX_SIZE];
+    char config[TOPIC_MAX_SIZE];
+ }  MqttTopics;
 
 class MqttHandler
 {
 private:  
     unsigned long lastSend = 0;
-    MqttTopic topic;
+    MqttTopics topics;
     PreferenceHandler &preference;
     WiFiClient &client;
     PubSubClient* mqtt_client;
